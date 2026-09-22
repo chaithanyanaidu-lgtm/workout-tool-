@@ -1,0 +1,15 @@
+{
+  "name": "claww-workout-os",
+  "version": "1.0.0",
+  "description": "CLAWW Workout Operating System - a deterministic, explainable strength & conditioning program generator and adaptation engine.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node tests/run.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
