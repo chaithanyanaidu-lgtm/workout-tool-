@@ -49,7 +49,11 @@ function load() {
 let DB = load();
 
 function persist() {
-  fs.writeFileSync(DB_PATH, JSON.stringify(DB, null, 2));
+  try {
+    fs.writeFileSync(DB_PATH, JSON.stringify(DB, null, 2));
+  } catch (err) {
+    console.warn("Warning: Could not write to disk, maintaining state in-memory:", err.message);
+  }
 }
 
 export const store = {

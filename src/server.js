@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 
 import { store } from "./db/store.js";
 import { generateProgram } from "./engines/programGenerator.js";
+import { getAvailableSplits, SPLIT_LIBRARY } from "./engines/splitEngine.js";
 import { logWorkoutSession, runAdaptationCheck } from "./engines/logAndAdapt.js";
 import { handleExerciseChangeRequest } from "./engines/alternativeEngine.js";
 import { computeNextTarget } from "./engines/progressionEngine.js";
@@ -28,6 +29,13 @@ app.get("/api/profile/:userId", (req, res) => {
   const profile = store.getProfile(req.params.userId);
   if (!profile) return res.status(404).json({ error: "not found" });
   res.json(profile);
+});
+
+// ---- Split Library ----
+app.get("/api/splits", (req, res) => {
+  const days = req.query.days ? Number(req.query.days) : null;
+  const splits = getAvailableSplits(days);
+  res.json({ splits });
 });
 
 // ---- Program generation ----

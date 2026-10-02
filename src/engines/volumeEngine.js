@@ -1,48 +1,47 @@
 /**
- * PHASE 5 — MUSCLE VOLUME ENGINE
+ * CLAWW — VOLUME ENGINE
  *
- * Determines weekly target volume (sets) per muscle group from
- * experience-level ranges, then distributes it across the week's
- * training days that emphasize that muscle. Tracks direct + secondary
- * (fractional) contribution so overlapping exercises don't silently
- * stack hidden volume.
+ * Tracks direct sets, secondary stimulus, effective sets, per-session volume,
+ * and weekly frequency across all muscle groups.
  *
- * SECONDARY_SET_WEIGHT: a secondary-mover set counts as a fraction of a
- * direct set toward that muscle's weekly total. This is an internal
- * accounting convention (not a physiological claim) used purely to stop
- * volume double-counting when exercises overlap.
+ * Implements Section 9 & 10.
  */
 
-import { MUSCLES } from "../data/exercises.js";
+import { MUSCLES, getExerciseById } from "../data/exercises.js";
 
 const SECONDARY_SET_WEIGHT = 0.5;
 
 /**
- * weeklyTargets: { muscle: {min, max} } sourced from the experience profile,
- * nudged slightly by goal emphasis (bulking trends toward the top of the
- * range over a block; cutting stays mid-range to manage fatigue).
+ * Computes weekly volume targets (min, max, target) per muscle.
+ * Trainee priority muscles receive an appropriate volume bump (+2 to 3 sets),
+ * bounded within the safe experience-level ceiling.
  */
-export function computeWeeklyMuscleTargets({ experienceProfile, goalProfile }) {
-  const { min, max } = experienceProfile.sets_per_muscle_per_week;
-  const trend = goalProfile.emphasis.volume_trend;
+export function computeWeeklyMuscleTargets({ experienceProfile, goalProfile, priorityMuscles = [] }) {
+  const { min, max } = experienceProfile.sets_per_muscle_per_week || { min: 8, max: 14 };
+  const trend = goalProfile?.emphasis?.volume_trend || "maintain";
+  const prioritySet = new Set(priorityMuscles.map((m) => m.toLowerCase()));
 
   const targets = {};
   for (const muscle of MUSCLES) {
     let target = Math.round((min + max) / 2);
+
     if (trend === "progressive_increase") target = Math.round(min + (max - min) * 0.65);
-    if (trend === "maintain_or_reduce") target = Math.round(min + (max - min) * 0.35);
-    if (trend === "maintain") target = Math.round(min + (max - min) * 0.5);
-    if (trend === "maintain_resistance_grow_cardio") target = Math.round(min + (max - min) * 0.4);
-    targets[muscle] = { min, max, target };
+    else if (trend === "maintain_or_reduce") target = Math.round(min + (max - min) * 0.35);
+    else if (trend === "maintain_resistance_grow_cardio") target = Math.round(min + (max - min) * 0.4);
+
+    // Give priority muscles a controlled volume emphasis without exceeding safe guidelines
+    if (prioritySet.has(muscle)) {
+      target = Math.min(max, target + 3);
+    }
+
+    targets[muscle] = { min, max, target, is_priority: prioritySet.has(muscle) };
   }
+
   return targets;
 }
 
 /**
- * Given the split's training days (with emphasis_muscles), distribute each
- * muscle's weekly target across the days that train it, weighted by how
- * central that muscle is to the day's session_type.
- * Returns: { day_index: { muscle: setsAllocated } }
+ * Distribute muscle targets across training days in the split.
  */
 export function distributeVolumeAcrossWeek({ splitDays, weeklyTargets }) {
   const trainingDays = splitDays.filter((d) => d.session_type !== "rest");
@@ -50,35 +49,113 @@ export function distributeVolumeAcrossWeek({ splitDays, weeklyTargets }) {
   for (const day of trainingDays) allocation[day.day_index] = {};
 
   for (const muscle of MUSCLES) {
-    const daysHitting = trainingDays.filter((d) => d.emphasis_muscles.includes(muscle));
+    const daysHitting = trainingDays.filter((d) => (d.emphasis_muscles || []).includes(muscle));
     if (daysHitting.length === 0) continue;
-    const target = weeklyTargets[muscle].target;
+
+    const target = weeklyTargets[muscle]?.target || 10;
     const perDay = Math.max(2, Math.round(target / daysHitting.length));
+
     for (const day of daysHitting) {
       allocation[day.day_index][muscle] = perDay;
     }
   }
+
   return allocation;
 }
 
 /**
- * Given a list of already-selected exercises for a session, compute the
- * effective volume contributed per muscle (direct sets full weight,
- * secondary sets fractional) so the validation engine can check against
- * the day's allocation without double-counting overlap.
+ * Computes detailed direct sets, secondary stimulus, and effective volume
+ * for a single session.
  */
 export function computeSessionVolume(sessionExercises) {
-  const totals = {};
-  for (const ex of sessionExercises) {
-    const sets = ex.sets;
-    for (const m of ex.exercise.primary_muscles) {
-      totals[m] = (totals[m] || 0) + sets;
+  const direct = {};
+  const secondary = {};
+  const effective = {};
+
+  for (const item of sessionExercises) {
+    const sets = item.sets || 3;
+    const ex = item.exercise || getExerciseById(item.exercise_id);
+    if (!ex) continue;
+
+    const stimulus = ex.muscle_stimulus_profile || ex.stimulus_contribution || item.stimulusContribution || {};
+
+    // Direct sets to primary muscles
+    for (const m of (ex.primary_muscles || [])) {
+      direct[m] = (direct[m] || 0) + sets;
+      const weight = stimulus[m] ?? 1.0;
+      effective[m] = (effective[m] || 0) + sets * weight;
     }
-    for (const m of ex.exercise.secondary_muscles) {
-      totals[m] = (totals[m] || 0) + sets * SECONDARY_SET_WEIGHT;
+
+    // Secondary sets to secondary muscles
+    for (const m of (ex.secondary_muscles || [])) {
+      if (!(ex.primary_muscles || []).includes(m)) {
+        secondary[m] = (secondary[m] || 0) + sets;
+        const weight = stimulus[m] ?? SECONDARY_SET_WEIGHT;
+        effective[m] = (effective[m] || 0) + sets * weight;
+      }
     }
   }
-  return totals;
+
+  for (const m of Object.keys(effective)) {
+    effective[m] = Math.round(effective[m] * 100) / 100;
+  }
+
+  return { direct, secondary, effective };
 }
+
+/**
+ * Computes weekly volume summary across all generated sessions.
+ * Returns direct sets, secondary sets, effective sets, and frequency per muscle.
+ */
+export function computeWeeklyVolumeSummary(sessions = []) {
+  const summary = {};
+
+  for (const m of MUSCLES) {
+    summary[m] = {
+      direct_sets: 0,
+      secondary_sets: 0,
+      effective_sets: 0,
+      frequency_days: 0,
+    };
+  }
+
+  for (const session of sessions) {
+    if (session.is_rest_day || !session.exercises) continue;
+
+    const measured = computeSessionVolume(session.exercises);
+    const dayMusclesStimulated = new Set();
+
+    for (const [m, sets] of Object.entries(measured.direct)) {
+      if (summary[m]) {
+        summary[m].direct_sets += sets;
+        dayMusclesStimulated.add(m);
+      }
+    }
+
+    for (const [m, sets] of Object.entries(measured.secondary)) {
+      if (summary[m]) {
+        summary[m].secondary_sets += sets;
+        dayMusclesStimulated.add(m);
+      }
+    }
+
+    for (const [m, eff] of Object.entries(measured.effective)) {
+      if (summary[m]) {
+        summary[m].effective_sets += eff;
+      }
+    }
+
+    for (const m of dayMusclesStimulated) {
+      if (summary[m]) summary[m].frequency_days += 1;
+    }
+  }
+
+  for (const m of MUSCLES) {
+    summary[m].effective_sets = Math.round(summary[m].effective_sets * 10) / 10;
+  }
+
+  return summary;
+}
+
 
 export { SECONDARY_SET_WEIGHT };
